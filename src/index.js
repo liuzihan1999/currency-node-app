@@ -1,129 +1,140 @@
-const path = require("path");
-const http = require("http");
-const express = require("express");
-const socketio = require("socket.io");
-const Filter = require("bad-words");
-const { generateMessage, generateLocationMessage } = require("./utils/messages");
-const { addUser, removeUser, getUser, getUsersInRoom } = require("./utils/users");
+require('dotenv').config();
+const express = require('express');
+const mysql = require('mysql2/promise');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const bodyParser = require('body-parser');
 
 const app = express();
-const server = http.createServer(app);
-const io = socketio(server);
+app.use(bodyParser.json());
 
-require("dotenv").config();
-
-const port = process.env.PORT || 3000;
-const publicDirectoryPath = path.join(__dirname, "../public");
-
-app.use(express.static(publicDirectoryPath));
-
-io.on("connection", socket => {
-  console.log("New WebSocket connection");
-
-  // socket.on("join", (options, callback) => {
-  //   console.log("Join");
-    
-  //   const { error, user } = addUser({ id: socket.id, ...options });
-  //   if (error) {
-  //     return callback(error);
-  //   } else {
-  //     socket.join(user.room);
-
-  //     socket.emit("message", generateMessage("Admin", "Welcome!"));
-  //     socket.broadcast.to(user.room).emit("message", generateMessage("Admin", `${user.username} has joined!`));
-  //     io.to(user.room).emit("roomData", {
-  //       room: user.room,
-  //       users: getUsersInRoom(user.room)
-  //     });
-
-  //     callback();
-  //   }
-  // });
-  socket.on("join", (options, callback) => {
-    console.log("Join");
-    
-    // const { latitude, longitude } = options;
-    const latitude = 60.0;
-    const longitude = 18.0;
-    
-    const isInSweden =
-    latitude >= 55.3 && latitude <= 69.1 &&
-    longitude >= 11.1 && longitude <= 24.2;
-    
-    if (!isInSweden) {
-    console.log("User not in sweden：lat=" + latitude + ", lon=" + longitude);
-    return callback("You are not in Sweden cannot access the chat！");
-    }
-    
-    const { error, user } = addUser({ id: socket.id, ...options });
-    
-    if (error) {
-    return callback(error);
-    }
-    
-    socket.join(user.room);
-    
-    socket.emit("message", generateMessage("Admin", "Welcome!"));
-    socket.broadcast.to(user.room).emit("message", generateMessage("Admin", `${user.username} has joined!`));
-    io.to(user.room).emit("roomData", {
-    room: user.room,
-    users: getUsersInRoom(user.room)
-    });
-    
-    callback();
-  });
-
-  socket.on("sendMessage", (message, callback) => {
-    console.log("Send message");
-    const user = getUser(socket.id);
-    const filter = new Filter();
-
-    if (filter.isProfane(message)) {
-      return callback("Profanity is not allowed!");
-    } 
-    else if(message.includes("NULL")){
-      return callback("NULL is not allowed!");
-    }else {
-      io.to(user.room).emit("message", generateMessage(user.username, message));
-      callback();
-    }
-  });
-
-  socket.on("sendLocation", (coords, callback) => {
-    console.log("Send location");
-
-    const user = getUser(socket.id);
-    const { latitude, longitude } = coords;
-    
-    const withinLatitudeRange = latitude >= 18 && latitude <= 54;
-    const withinLongitudeRange = longitude >= 73 && longitude <= 135;
-    
-    if (withinLatitudeRange && withinLongitudeRange) {
-    console.log(`${user.username} is within target location China: lat=${latitude}, long=${longitude}`);
-    } else {
-      console.log(`${user.username} is NOT within target location China: lat=${latitude}, long=${longitude}`);
-    }
-    
-    io.to(user.room).emit("locationMessage", generateLocationMessage(user.username, `https://www.google.com/maps?q=${coords.latitude},${coords.longitude}`));
-
-    callback();
-  });
-  
-
-  socket.on("disconnect", () => {
-    console.log("Disconnect");
-    const user = removeUser(socket.id);
-
-    if (user) {
-      io.to(user.room).emit("message", generateMessage("Admin", `${user.username} has left!`));
-      io.to(user.room).emit("roomData", {
-        room: user.room,
-        users: getUsersInRoom(user.room)
-      });
-    }
-  });
+// MySQL connection pool
+const pool = mysql.createPool({
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
 });
 
-server.listen(port, () => {
-  console.log(`Server is up on port ${port}!`);
+// Middleware to authenticate JWT
+const authenticateToken = async (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ message: 'Unauthorized' });
+
+  try {
+    const user = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = user;
+    next();
+  } catch {
+    res.status(403).json({ message: 'Forbidden' });
+  }
+};
+
+// Middleware for role check
+const authorizeAdmin = (req, res, next) => {
+  if (req.user.role !== 1) {
+    return res.status(403).json({ message: 'Admin access required' });
+  }
+  next();
+};
+
+// Register
+app.post('/register', async (req, res) => {
+  const { username, email, password } = req.body;
+  if (!(username && email && password)) {
+    return res.status(400).json({ message: 'Missing fields' });
+  }
+
+  const conn = await pool.getConnection();
+  try {
+    const [existing] = await conn.query('SELECT * FROM users WHERE username = ? OR email = ?', [username, email]);
+    if (existing.length) return res.status(409).json({ message: 'User already exists' });
+
+    const hash = await bcrypt.hash(password, 10);
+    await conn.query(
+      'INSERT INTO users (username, email, password_hash, role, created_at, updated_at) VALUES (?, ?, ?, ?, NOW(), NOW())',
+      [username, email, hash, 0]
+    );
+    res.json({ message: 'User registered successfully' });
+  } finally {
+    conn.release();
+  }
+});
+
+// Login
+app.post('/login', async (req, res) => {
+  const { username, password } = req.body;
+  const conn = await pool.getConnection();
+  try {
+    const [rows] = await conn.query('SELECT * FROM users WHERE username = ?', [username]);
+    const user = rows[0];
+    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    const token = jwt.sign({ user_id: user.user_id, username: user.username, role: user.role }, process.env.JWT_SECRET, {
+      expiresIn: '2h',
+    });
+    res.json({ token });
+  } finally {
+    conn.release();
+  }
+});
+
+// View Profile
+app.get('/searchProfile', authenticateToken, async (req, res) => {
+  const conn = await pool.getConnection();
+  try {
+    const [rows] = await conn.query('SELECT user_id, username, email, role, created_at FROM users WHERE user_id = ?', [
+      req.user.user_id,
+    ]);
+    res.json(rows[0]);
+  } finally {
+    conn.release();
+  }
+});
+
+// Update Profile
+app.put('/updateProfile', authenticateToken, async (req, res) => {
+  const { username, email, password } = req.body;
+  const conn = await pool.getConnection();
+  try {
+    const hash = password ? await bcrypt.hash(password, 10) : undefined;
+
+    await conn.query(
+      'UPDATE users SET username = ?, email = ?, password_hash = ?, updated_at = NOW() WHERE user_id = ?',
+      [username, email, hash, req.user.user_id]
+    );
+    res.json({ message: 'Profile updated successfully' });
+  } finally {
+    conn.release();
+  }
+});
+
+// Admin Only: Get All Users
+app.get('/admin/users', authenticateToken, authorizeAdmin, async (req, res) => {
+  const conn = await pool.getConnection();
+  try {
+    const [rows] = await conn.query('SELECT user_id, username, email, role, created_at FROM users');
+    res.json(rows);
+  } finally {
+    conn.release();
+  }
+});
+
+// Admin Only: Delete User
+app.delete('/admin/users/:id', authenticateToken, authorizeAdmin, async (req, res) => {
+  const conn = await pool.getConnection();
+  try {
+    await conn.query('DELETE FROM users WHERE user_id = ?', [req.params.id]);
+    res.json({ message: 'User deleted' });
+  } finally {
+    conn.release();
+  }
+});
+
+// Start server
+app.listen(process.env.PORT, () => {
+  console.log(`Server running on port ${process.env.PORT}`);
 });
