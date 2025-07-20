@@ -7,11 +7,18 @@ CREATE TABLE users (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 -- 2. currencies 货币表
-CREATE TABLE currencies (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  code VARCHAR(10) UNIQUE NOT NULL,  -- 如 USD, EUR
-  name VARCHAR(100) NOT NULL
-);
+CREATE TABLE currencies  (
+  `id` int UNSIGNED NOT NULL AUTO_INCREMENT,
+  `iso_code` char(3) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT 'ISO 4217 ',
+  `name` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT 'currency full name',
+  `country` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL,
+  `symbol` varchar(30) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT 'currency symbol, like $',
+  `is_active` tinyint(1) NOT NULL DEFAULT 1 COMMENT '1=\'on\'，0=\'off\'',
+  `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uq_iso_code`(`iso_code` ASC) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci ROW_FORMAT = Dynamic;
+
 -- 3. base_exchange_rates 基准汇率表（USD ➝ 其他） 用于存储每天 USD ➝ 各种目标货币 的汇率
 CREATE TABLE base_exchange_rates (
   id INT AUTO_INCREMENT PRIMARY KEY,
